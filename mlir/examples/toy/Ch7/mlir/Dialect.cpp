@@ -15,10 +15,12 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Transforms/InliningUtils.h"
+#include "llvm/ADT/ArrayRef.h"
 
 using namespace mlir;
 using namespace mlir::toy;
@@ -490,6 +492,49 @@ mlir::LogicalResult TransposeOp::verify() {
                   resultType.getShape().rbegin())) {
     return emitError()
            << "expected result shape to be a transpose of the input";
+  }
+  return mlir::success();
+}
+
+// MatMulOp
+
+void MatMulOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                  mlir::Value lhs, mlir::Value rhs) {
+  state.addTypes(UnrankedTensorType::get(builder.getF64Type()));
+  state.addOperands({lhs, rhs});
+}
+
+mlir::ParseResult MatMulOp::parse(mlir::OpAsmParser &parser,
+                               mlir::OperationState &result) {
+  return parseBinaryOp(parser, result);
+}
+
+void MatMulOp::print(mlir::OpAsmPrinter &p) { printBinaryOp(p, *this); }
+
+/// Infer the output shape of the MatMulOp, this is required by the shape inference
+/// interface.
+void MatMulOp::inferShapes() { 
+  auto newShape = llvm::ArrayRef<int64_t>({getLhs().getType().getShape()[0],getRhs().getType().getShape()[1]});
+  getResult().setType(mlir::RankedTensorType::get(newShape, getLhs().getType().getElementType())); 
+}
+
+mlir::LogicalResult MatMulOp::verify() {
+  auto inputType1 = llvm::dyn_cast<RankedTensorType>(getOperand(0).getType());
+  auto inputType2 = llvm::dyn_cast<RankedTensorType>(getOperand(1).getType());
+  auto resultType = llvm::dyn_cast<RankedTensorType>(getType());
+  if (!inputType1 || !inputType2 || !resultType )
+    return mlir::success();
+
+  auto inputShape = inputType1.getShape();
+  auto inputShape2 = inputType2.getShape();
+  auto resultShape = resultType.getShape();
+  if(inputShape.size() != inputShape2.size()|| inputShape.size() != resultShape.size()|| inputShape.size() != 2)
+  {
+    return emitError() << "the rank of lhs, rhs and result should be 2";
+  }
+  if(!(inputShape[0]==resultShape[0]&&inputShape[1]==inputShape2[0]&&resultShape[1]==inputShape2[1]))
+  {
+    return emitError() << "the shape of lhs, rhs, and result should match";
   }
   return mlir::success();
 }

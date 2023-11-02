@@ -13,6 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Value.h"
+#include "mlir/Support/LogicalResult.h"
 #include "toy/Dialect.h"
 #include "toy/Passes.h"
 
@@ -22,6 +27,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Sequence.h"
 
 using namespace mlir;
@@ -129,6 +135,26 @@ struct BinaryOpLowering : public ConversionPattern {
 };
 using AddOpLowering = BinaryOpLowering<toy::AddOp, arith::AddFOp>;
 using MulOpLowering = BinaryOpLowering<toy::MulOp, arith::MulFOp>;
+
+// lower toy.matmul to an affine loop nest
+struct MatMulOpLowering : public mlir::ConversionPattern{
+  MatMulOpLowering(mlir::MLIRContext *ctx)
+  // 1 is the benefit of applying this pattern
+  : mlir::ConversionPattern(toy::MatMulOp::getOperationName(), 1, ctx){}
+  mlir::LogicalResult matchAndRewrite(mlir::Operation *op, ArrayRef<mlir::Value> operands, mlir::ConversionPatternRewriter &rewriter) const final{
+    auto loc = op->getLoc();
+    lowerOpToLoops(op, operands, rewriter, [loc](mlir::PatternRewriter &rewriter, ArrayRef<mlir::Value> memRefOperands, ArrayRef<mlir::Value> loopIvs)
+    {
+      toy::MatMulOpAdaptor matmulAdaptor(memRefOperands);
+      mlir::Value lhs = matmulAdaptor.getLhs();
+      mlir::Value rhs = matmulAdaptor.getRhs();
+    });
+
+    return success();
+  }
+
+};
+
 
 //===----------------------------------------------------------------------===//
 // ToyToAffine RewritePatterns: Constant operations
