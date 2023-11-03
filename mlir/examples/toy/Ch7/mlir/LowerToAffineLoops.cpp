@@ -12,11 +12,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LogicalResult.h"
 #include "toy/Dialect.h"
 #include "toy/Passes.h"
@@ -29,6 +33,9 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
+#include <cstdint>
 
 using namespace mlir;
 
@@ -143,13 +150,44 @@ struct MatMulOpLowering : public mlir::ConversionPattern{
   : mlir::ConversionPattern(toy::MatMulOp::getOperationName(), 1, ctx){}
   mlir::LogicalResult matchAndRewrite(mlir::Operation *op, ArrayRef<mlir::Value> operands, mlir::ConversionPatternRewriter &rewriter) const final{
     auto loc = op->getLoc();
-    lowerOpToLoops(op, operands, rewriter, [loc](mlir::PatternRewriter &rewriter, ArrayRef<mlir::Value> memRefOperands, ArrayRef<mlir::Value> loopIvs)
-    {
-      toy::MatMulOpAdaptor matmulAdaptor(memRefOperands);
-      mlir::Value lhs = matmulAdaptor.getLhs();
-      mlir::Value rhs = matmulAdaptor.getRhs();
+    auto tensorType = llvm::cast<RankedTensorType>(*op->result_type_begin());
+    
+    //Insert an allocation and deallocation for the result of this operation
+    auto memRefType = convertTensorToMemRef(tensorType);
+    auto alloc = insertAllocAndDealloc(memRefType,loc, rewriter);
+    llvm::SmallVector<int64_t, 4> lowerBounds(tensorType.getRank(), 0);
+    llvm::SmallVector<int64_t, 4> steps(tensorType.getRank(), 1);
+
+    //Initialize the result tensor to zeros
+    affine::buildAffineLoopNest(rewriter, loc, lowerBounds, tensorType.getShape(), steps, 
+    [&](OpBuilder &builder, Location loc, ValueRange ivs) {
+      builder.create<affine::AffineStoreOp>(loc, builder.create<arith::ConstantFloatOp>(loc, 0.0, tensorType.getElementType()), alloc, ivs);
     });
 
+    
+    toy::MatMulOpAdaptor matmulAdaptor(operands);
+    auto lhs = matmulAdaptor.getLhs();
+    auto rhs = matmulAdaptor.getRhs();
+
+    llvm::SmallVector<int64_t, 1> dimN;
+    auto dim = lhs.getType().cast<RankedTensorType>().getShape()[1];
+    dimN.push_back(dim);
+
+    affine::buildAffineLoopNest(rewriter, loc, lowerBounds, tensorType.getShape(), steps,
+    [&](OpBuilder &builder, Location loc, ValueRange ivs)
+    {
+      auto i = ivs[0];
+      auto j = ivs[1];
+      auto k = ivs[2];
+      auto lhsElem = builder.create<affine::AffineLoadOp>(loc, lhs, ValueRange{i, k});
+      auto rhsElem = builder.create<affine::AffineLoadOp>(loc, rhs, ValueRange{j, k});
+      auto prod = builder.create<arith::MulFOp>(loc,lhsElem, rhsElem);
+      auto oldVal = builder.create<affine::AffineLoadOp>(loc, alloc, ValueRange{i, j});
+      auto newVal = builder.create<arith::AddFOp>(loc, oldVal, prod);
+      builder.create<affine::AffineStoreOp>(loc, newVal, alloc, ValueRange{i, j});
+    }
+    );
+    rewriter.replaceOp(op,alloc);
     return success();
   }
 
